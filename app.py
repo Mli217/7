@@ -548,7 +548,7 @@ def main():
     st.title("🏫 无人机地面站系统 - 平行偏移绕行")
     st.markdown("---")
 
-    # 初始化各种session_state
+    # 初始化所有会话状态
     if "points_gcj" not in st.session_state:
         st.session_state.points_gcj = {'A': DEFAULT_A_GCJ.copy(), 'B': DEFAULT_B_GCJ.copy()}
     if "obstacles_gcj" not in st.session_state:
@@ -570,7 +570,7 @@ def main():
     if "pending_height" not in st.session_state:
         st.session_state.pending_height = 20
 
-    # 心跳包专用状态
+    # 心跳包专用状态（必须初始化）
     if "heartbeat_seq_list" not in st.session_state:
         st.session_state.heartbeat_seq_list = []          # 序号列表
         st.session_state.heartbeat_time_list = []         # 时间字符串列表
