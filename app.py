@@ -111,7 +111,6 @@ def line_intersects_polygon(p1, p2, polygon):
 def distance(p1, p2):
     return math.sqrt((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2)
 
-# ===== 航点距离抽稀函数 =====
 def simplify_path_by_distance(points, min_dist_deg=0.0003):
     if len(points) <= 2:
         return points
@@ -125,16 +124,13 @@ def simplify_path_by_distance(points, min_dist_deg=0.0003):
         new_path.append(points[-1])
     return new_path
 
-# ==================== 三次B样条路径平滑 ====================
 def catmull_rom_spline(points, num_points=6):
     if len(points) < 2:
         return points
     if len(points) == 2:
         return [points[0], points[1]]
-    
     extended = [points[0]] + points + [points[-1]]
     spline_points = []
-    
     for i in range(len(extended)-3):
         p0, p1, p2, p3 = extended[i], extended[i+1], extended[i+2], extended[i+3]
         for t in np.linspace(0, 1, num_points):
@@ -153,7 +149,6 @@ def catmull_rom_spline(points, num_points=6):
     full_spline = [points[0]] + unique_points + [points[-1]]
     return simplify_path_by_distance(full_spline, min_dist_deg=0.0003)
 
-# ==================== 障碍物高度与阻挡判断 ====================
 def is_obstacle_blocking(obs, flight_height):
     obs_height = obs.get('height', 20)
     return flight_height < obs_height
@@ -167,7 +162,6 @@ def is_path_blocked(p1, p2, obstacles_gcj, flight_height):
                     return True
     return False
 
-# ==================== 单侧绕行路径生成（简化版） ====================
 def generate_side_bypass_path(start, end, obstacles_gcj, flight_height, safe_radius, side='left'):
     block_obs = [obs for obs in obstacles_gcj if is_obstacle_blocking(obs, flight_height)]
     if not block_obs:
@@ -231,7 +225,6 @@ def generate_side_bypass_path(start, end, obstacles_gcj, flight_height, safe_rad
             return final_path
     return None
 
-# ==================== A*路径规划 ====================
 def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
     nodes = [start, end]
     safety = safe_radius / 111000.0 * 2.0
@@ -307,7 +300,6 @@ def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
                 heapq.heappush(open_heap, (f_score[neighbor], neighbor))
     return simplify_path_by_distance([start, end])
 
-# ==================== 路径规划主函数 ====================
 def create_avoidance_path(start, end, obstacles_gcj, flight_height, safe_radius, strategy):
     straight_blocked = is_path_blocked(start, end, obstacles_gcj, flight_height)
     if not straight_blocked:
@@ -556,6 +548,7 @@ def main():
     st.title("🏫 无人机地面站系统 - 平行偏移绕行")
     st.markdown("---")
 
+    # 初始化各种session_state
     if "points_gcj" not in st.session_state:
         st.session_state.points_gcj = {'A': DEFAULT_A_GCJ.copy(), 'B': DEFAULT_B_GCJ.copy()}
     if "obstacles_gcj" not in st.session_state:
@@ -564,8 +557,6 @@ def main():
         st.session_state.saved_obstacles = []
     if "heartbeat_sim" not in st.session_state:
         st.session_state.heartbeat_sim = HeartbeatSimulator(st.session_state.points_gcj['A'].copy())
-    if "last_hb_time" not in st.session_state:
-        st.session_state.last_hb_time = time.time()
     if "simulation_running" not in st.session_state:
         st.session_state.simulation_running = False
     if "flight_altitude" not in st.session_state:
@@ -578,13 +569,16 @@ def main():
         st.session_state.pending_polygon = None
     if "pending_height" not in st.session_state:
         st.session_state.pending_height = 20
-    # 新增：心跳监控专用状态
-    if "heartbeat_seq_list" not in st.session_state:
-        st.session_state.heartbeat_seq_list = []
-        st.session_state.heartbeat_time_list = []
-        st.session_state.last_heartbeat_time = time.time()
-        st.session_state.heartbeat_seq = 0
 
+    # 心跳包专用状态
+    if "heartbeat_seq_list" not in st.session_state:
+        st.session_state.heartbeat_seq_list = []          # 序号列表
+        st.session_state.heartbeat_time_list = []         # 时间字符串列表
+        st.session_state.heartbeat_last_time = time.time()  # 最后心跳时间
+        st.session_state.heartbeat_seq = 0                 # 当前序号
+        st.session_state.heartbeat_running = False         # 是否正在生成心跳
+
+    # 侧边栏菜单
     st.sidebar.title("🎛️ 导航菜单")
     page = st.sidebar.radio("选择功能模块", ["🗺️ 航线规划", "📡 飞行监控", "🚧 障碍物管理"])
     map_type_choice = st.sidebar.radio("🗺️ 地图类型", ["卫星影像", "矢量街道"], index=0)
@@ -615,16 +609,12 @@ def main():
 
     if st.sidebar.button("🔄 刷新数据", use_container_width=True):
         st.session_state.planned_path = create_avoidance_path(
-            st.session_state.points_gcj['A'],
-            st.session_state.points_gcj['B'],
-            st.session_state.obstacles_gcj,
-            st.session_state.flight_altitude,
-            safe_radius,
-            selected_strategy
+            st.session_state.points_gcj['A'], st.session_state.points_gcj['B'],
+            st.session_state.obstacles_gcj, st.session_state.flight_altitude, safe_radius, selected_strategy
         )
         st.rerun()
 
-    # ==================== 航线规划 ====================
+    # ==================== 航线规划页面 ====================
     if page == "🗺️ 航线规划":
         st.header("🗺️ 航线规划 - 智能避障")
         if straight_blocked:
@@ -693,11 +683,20 @@ def main():
                     st.session_state.heartbeat_sim.set_path(path, st.session_state.flight_altitude, drone_speed)
                     st.session_state.simulation_running = True
                     st.session_state.flight_history = []
+                    # 启动心跳生成
+                    st.session_state.heartbeat_running = True
+                    # 重置心跳序号列表（开始新任务，清空旧数据）
+                    st.session_state.heartbeat_seq_list = []
+                    st.session_state.heartbeat_time_list = []
+                    st.session_state.heartbeat_seq = 0
+                    st.session_state.heartbeat_last_time = time.time()
                     st.success("已开始飞行")
             with c2:
                 if st.button("⏹️ 停止飞行", use_container_width=True):
                     st.session_state.simulation_running = False
                     st.session_state.heartbeat_sim.stop()
+                    st.session_state.heartbeat_running = False
+                    st.success("已停止飞行")
 
         with col2:
             st.subheader("🗺️ 规划地图")
@@ -721,35 +720,36 @@ def main():
                             st.session_state.pending_polygon = poly
                             st.success("已捕获多边形")
 
-    # ==================== 飞行监控 ====================
+    # ==================== 飞行监控页面 ====================
     elif page == "📡 飞行监控":
         st.header("🛸 飞行实时画面 - 任务执行监控")
 
-        # 自动刷新页面（每秒）
-        st_autorefresh(interval=1000, key="heartbeat_autorefresh")
+        # 自动刷新（每秒一次，用于更新心跳和飞行状态）
+        st_autorefresh(interval=1000, key="flight_refresh")
 
-        # 生成新心跳包
+        # 心跳生成：仅在开始任务后且未停止时生成
         current_time = time.time()
-        st.session_state.heartbeat_seq += 1
-        time_str = datetime.now().strftime("%H:%M:%S")
-        st.session_state.heartbeat_seq_list.append(st.session_state.heartbeat_seq)
-        st.session_state.heartbeat_time_list.append(time_str)
-        st.session_state.last_heartbeat_time = current_time
+        if st.session_state.heartbeat_running:
+            st.session_state.heartbeat_seq += 1
+            time_str = datetime.now().strftime("%H:%M:%S")
+            st.session_state.heartbeat_seq_list.append(st.session_state.heartbeat_seq)
+            st.session_state.heartbeat_time_list.append(time_str)
+            st.session_state.heartbeat_last_time = current_time
+            if len(st.session_state.heartbeat_seq_list) > 100:
+                st.session_state.heartbeat_seq_list = st.session_state.heartbeat_seq_list[-100:]
+                st.session_state.heartbeat_time_list = st.session_state.heartbeat_time_list[-100:]
 
-        # 限制列表长度
-        if len(st.session_state.heartbeat_seq_list) > 100:
-            st.session_state.heartbeat_seq_list = st.session_state.heartbeat_seq_list[-100:]
-            st.session_state.heartbeat_time_list = st.session_state.heartbeat_time_list[-100:]
-
-        # 检测超时
-        time_since_last = current_time - st.session_state.last_heartbeat_time
-        if time_since_last > 3.0:
+        # 超时检测
+        time_since_last = current_time - st.session_state.heartbeat_last_time
+        if st.session_state.heartbeat_running and time_since_last > 3.0:
             st.error("🚨 连接超时！超过3秒未收到心跳包")
-        else:
+        elif st.session_state.heartbeat_running:
             st.success(f"✅ 连接正常 | 距上次心跳: {time_since_last:.1f} 秒")
+        else:
+            st.info("⏳ 未开始任务，无心跳数据")
 
         # 显示最新心跳序号
-        st.metric("最新心跳序号", st.session_state.heartbeat_seq)
+        st.metric("最新心跳序号", st.session_state.heartbeat_seq if st.session_state.heartbeat_running else 0)
 
         # 绘制折线图
         if len(st.session_state.heartbeat_seq_list) >= 2:
@@ -761,37 +761,54 @@ def main():
 
         st.markdown("---")
 
-        # 飞行控制与状态（原功能）
+        # 飞行控制按钮
         col_ctrl, col_status = st.columns([3, 1])
         with col_ctrl:
             c1, c2, c3, c4 = st.columns(4)
             with c1:
                 if st.button("开始任务", type="primary", use_container_width=True):
+                    # 启动飞行模拟
                     path = st.session_state.planned_path or [st.session_state.points_gcj['A'], st.session_state.points_gcj['B']]
                     st.session_state.heartbeat_sim.set_path(path, st.session_state.flight_altitude, drone_speed)
                     st.session_state.simulation_running = True
                     st.session_state.flight_history = []
+                    # 启动心跳生成
+                    st.session_state.heartbeat_running = True
+                    # 重置心跳序号列表（开始新任务，清空旧数据）
+                    st.session_state.heartbeat_seq_list = []
+                    st.session_state.heartbeat_time_list = []
+                    st.session_state.heartbeat_seq = 0
+                    st.session_state.heartbeat_last_time = time.time()
                     st.rerun()
             with c2:
                 if st.button("暂停", use_container_width=True):
                     st.session_state.heartbeat_sim.pause()
+                    st.session_state.simulation_running = False  # 飞行暂停，心跳继续
                     st.rerun()
             with c3:
                 if st.button("停止", use_container_width=True):
                     st.session_state.simulation_running = False
                     st.session_state.heartbeat_sim.stop()
+                    st.session_state.heartbeat_running = False
                     st.rerun()
             with c4:
                 if st.button("重置", use_container_width=True):
+                    # 重置飞行模拟
                     st.session_state.heartbeat_sim.reset()
                     st.session_state.simulation_running = False
                     st.session_state.flight_history = []
+                    # 重置心跳所有状态
+                    st.session_state.heartbeat_running = False
+                    st.session_state.heartbeat_seq_list = []
+                    st.session_state.heartbeat_time_list = []
+                    st.session_state.heartbeat_seq = 0
+                    st.session_state.heartbeat_last_time = time.time()
                     st.rerun()
         with col_status:
-            status = "运行中" if st.session_state.simulation_running and not st.session_state.heartbeat_sim.paused else "已暂停"
-            st.info(f"状态：{status}")
+            status = "飞行中" if st.session_state.simulation_running else "已停止"
+            st.info(f"飞行状态：{status}")
 
-        # 实时飞行状态显示
+        # 实时飞行数据显示
         if st.session_state.heartbeat_sim.history:
             latest = st.session_state.heartbeat_sim.history[0]
             cols = st.columns(6)
@@ -807,7 +824,7 @@ def main():
 
         st.markdown("---")
 
-        # 地图和通信日志（原功能）
+        # 地图和通信日志
         map_col, comm_col = st.columns([2, 1])
         with map_col:
             st.subheader("实时飞行地图")
@@ -860,7 +877,7 @@ def main():
                         log_text2 += line + "\n"
                 st.text_area("", log_text2, height=220)
 
-    # ==================== 障碍物管理 ====================
+    # ==================== 障碍物管理页面 ====================
     elif page == "🚧 障碍物管理":
         st.header("🚧 障碍物管理")
         st.info(f"当前共 {len(st.session_state.obstacles_gcj)} 个障碍物")
