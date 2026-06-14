@@ -570,13 +570,12 @@ def main():
     if "pending_height" not in st.session_state:
         st.session_state.pending_height = 20
 
-    # 心跳包专用状态（必须初始化）
-    if "heartbeat_seq_list" not in st.session_state:
-        st.session_state.heartbeat_seq_list = []          # 序号列表
-        st.session_state.heartbeat_time_list = []         # 时间字符串列表
-        st.session_state.heartbeat_last_time = time.time()  # 最后心跳时间
-        st.session_state.heartbeat_seq = 0                 # 当前序号
-        st.session_state.heartbeat_running = False         # 是否正在生成心跳
+    # 新增：独立心跳折线图专用状态（不依赖飞行任务）
+    if "hb_seq_list" not in st.session_state:
+        st.session_state.hb_seq_list = []        # 心跳序号列表
+        st.session_state.hb_time_list = []       # 心跳时间列表
+        st.session_state.hb_last_time = time.time()
+        st.session_state.hb_seq = 0
 
     # 侧边栏菜单
     st.sidebar.title("🎛️ 导航菜单")
@@ -683,19 +682,11 @@ def main():
                     st.session_state.heartbeat_sim.set_path(path, st.session_state.flight_altitude, drone_speed)
                     st.session_state.simulation_running = True
                     st.session_state.flight_history = []
-                    # 启动心跳生成
-                    st.session_state.heartbeat_running = True
-                    # 重置心跳序号列表（开始新任务，清空旧数据）
-                    st.session_state.heartbeat_seq_list = []
-                    st.session_state.heartbeat_time_list = []
-                    st.session_state.heartbeat_seq = 0
-                    st.session_state.heartbeat_last_time = time.time()
                     st.success("已开始飞行")
             with c2:
                 if st.button("⏹️ 停止飞行", use_container_width=True):
                     st.session_state.simulation_running = False
                     st.session_state.heartbeat_sim.stop()
-                    st.session_state.heartbeat_running = False
                     st.success("已停止飞行")
 
         with col2:
@@ -724,91 +715,74 @@ def main():
     elif page == "📡 飞行监控":
         st.header("🛸 飞行实时画面 - 任务执行监控")
 
-        # 自动刷新（每秒一次，用于更新心跳和飞行状态）
+        # 自动刷新（每秒一次，用于更新独立心跳和飞行状态）
         st_autorefresh(interval=1000, key="flight_refresh")
 
-        # 心跳生成：仅在开始任务后且未停止时生成
+        # ===== 新增：独立心跳折线图模块（一直运行，不依赖飞行任务）=====
         current_time = time.time()
-        if st.session_state.heartbeat_running:
-            st.session_state.heartbeat_seq += 1
-            time_str = datetime.now().strftime("%H:%M:%S")
-            st.session_state.heartbeat_seq_list.append(st.session_state.heartbeat_seq)
-            st.session_state.heartbeat_time_list.append(time_str)
-            st.session_state.heartbeat_last_time = current_time
-            if len(st.session_state.heartbeat_seq_list) > 100:
-                st.session_state.heartbeat_seq_list = st.session_state.heartbeat_seq_list[-100:]
-                st.session_state.heartbeat_time_list = st.session_state.heartbeat_time_list[-100:]
+        # 每秒生成一个新的心跳序号
+        st.session_state.hb_seq += 1
+        time_str = datetime.now().strftime("%H:%M:%S")
+        st.session_state.hb_seq_list.append(st.session_state.hb_seq)
+        st.session_state.hb_time_list.append(time_str)
+        st.session_state.hb_last_time = current_time
+        # 限制列表长度
+        if len(st.session_state.hb_seq_list) > 100:
+            st.session_state.hb_seq_list = st.session_state.hb_seq_list[-100:]
+            st.session_state.hb_time_list = st.session_state.hb_time_list[-100:]
 
-        # 超时检测
-        time_since_last = current_time - st.session_state.heartbeat_last_time
-        if st.session_state.heartbeat_running and time_since_last > 3.0:
-            st.error("🚨 连接超时！超过3秒未收到心跳包")
-        elif st.session_state.heartbeat_running:
-            st.success(f"✅ 连接正常 | 距上次心跳: {time_since_last:.1f} 秒")
+        # 超时检测（3秒无新包则报警）
+        time_since_last = current_time - st.session_state.hb_last_time
+        if time_since_last > 3.0:
+            st.error("🚨 心跳连接超时！超过3秒未收到心跳包")
         else:
-            st.info("⏳ 未开始任务，无心跳数据")
+            st.success(f"✅ 心跳连接正常 | 距上次心跳: {time_since_last:.1f} 秒")
 
         # 显示最新心跳序号
-        st.metric("最新心跳序号", st.session_state.heartbeat_seq if st.session_state.heartbeat_running else 0)
+        st.metric("📶 最新心跳序号", st.session_state.hb_seq)
 
         # 绘制折线图
-        if len(st.session_state.heartbeat_seq_list) >= 2:
-            df_heartbeat = pd.DataFrame({
-                "时间": st.session_state.heartbeat_time_list,
-                "序号": st.session_state.heartbeat_seq_list
+        if len(st.session_state.hb_seq_list) >= 2:
+            df_hb = pd.DataFrame({
+                "时间": st.session_state.hb_time_list,
+                "序号": st.session_state.hb_seq_list
             })
-            st.line_chart(df_heartbeat.set_index("时间"))
+            st.line_chart(df_hb.set_index("时间"))
 
         st.markdown("---")
+        # ===== 独立心跳模块结束 =====
 
-        # 飞行控制按钮
+        # 以下为原有飞行监控内容（完全未改动）
         col_ctrl, col_status = st.columns([3, 1])
         with col_ctrl:
             c1, c2, c3, c4 = st.columns(4)
             with c1:
                 if st.button("开始任务", type="primary", use_container_width=True):
-                    # 启动飞行模拟
                     path = st.session_state.planned_path or [st.session_state.points_gcj['A'], st.session_state.points_gcj['B']]
                     st.session_state.heartbeat_sim.set_path(path, st.session_state.flight_altitude, drone_speed)
                     st.session_state.simulation_running = True
                     st.session_state.flight_history = []
-                    # 启动心跳生成
-                    st.session_state.heartbeat_running = True
-                    # 重置心跳序号列表（开始新任务，清空旧数据）
-                    st.session_state.heartbeat_seq_list = []
-                    st.session_state.heartbeat_time_list = []
-                    st.session_state.heartbeat_seq = 0
-                    st.session_state.heartbeat_last_time = time.time()
                     st.rerun()
             with c2:
                 if st.button("暂停", use_container_width=True):
                     st.session_state.heartbeat_sim.pause()
-                    st.session_state.simulation_running = False  # 飞行暂停，心跳继续
+                    st.session_state.simulation_running = False
                     st.rerun()
             with c3:
                 if st.button("停止", use_container_width=True):
                     st.session_state.simulation_running = False
                     st.session_state.heartbeat_sim.stop()
-                    st.session_state.heartbeat_running = False
                     st.rerun()
             with c4:
                 if st.button("重置", use_container_width=True):
-                    # 重置飞行模拟
                     st.session_state.heartbeat_sim.reset()
                     st.session_state.simulation_running = False
                     st.session_state.flight_history = []
-                    # 重置心跳所有状态
-                    st.session_state.heartbeat_running = False
-                    st.session_state.heartbeat_seq_list = []
-                    st.session_state.heartbeat_time_list = []
-                    st.session_state.heartbeat_seq = 0
-                    st.session_state.heartbeat_last_time = time.time()
                     st.rerun()
         with col_status:
-            status = "飞行中" if st.session_state.simulation_running else "已停止"
+            status = "运行中" if st.session_state.simulation_running and not st.session_state.heartbeat_sim.paused else "已暂停"
             st.info(f"飞行状态：{status}")
 
-        # 实时飞行数据显示
         if st.session_state.heartbeat_sim.history:
             latest = st.session_state.heartbeat_sim.history[0]
             cols = st.columns(6)
@@ -823,8 +797,6 @@ def main():
             st.info("等待飞行任务开始...")
 
         st.markdown("---")
-
-        # 地图和通信日志
         map_col, comm_col = st.columns([2, 1])
         with map_col:
             st.subheader("实时飞行地图")
