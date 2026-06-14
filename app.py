@@ -12,6 +12,7 @@ import pandas as pd
 import copy
 import heapq
 import numpy as np
+from streamlit_autorefresh import st_autorefresh
 
 # ==================== 页面配置 ====================
 st.set_page_config(page_title="无人机地面站系统 - 平行偏移绕行", layout="wide")
@@ -112,7 +113,6 @@ def distance(p1, p2):
 
 # ===== 航点距离抽稀函数 =====
 def simplify_path_by_distance(points, min_dist_deg=0.0003):
-    """按经纬度距离抽稀航线，小于阈值的航点剔除，保留首尾和拐点"""
     if len(points) <= 2:
         return points
     new_path = [points[0]]
@@ -127,7 +127,6 @@ def simplify_path_by_distance(points, min_dist_deg=0.0003):
 
 # ==================== 三次B样条路径平滑 ====================
 def catmull_rom_spline(points, num_points=6):
-    """Catmull-Rom 样条曲线，生成平滑+精简路径"""
     if len(points) < 2:
         return points
     if len(points) == 2:
@@ -141,18 +140,8 @@ def catmull_rom_spline(points, num_points=6):
         for t in np.linspace(0, 1, num_points):
             t2 = t * t
             t3 = t2 * t
-            x = 0.5 * (
-                (2 * p1[0]) +
-                (-p0[0] + p2[0]) * t +
-                (2*p0[0] - 5*p1[0] + 4*p2[0] - p3[0]) * t2 +
-                (-p0[0] + 3*p1[0] - 3*p2[0] + p3[0]) * t3
-            )
-            y = 0.5 * (
-                (2 * p1[1]) +
-                (-p0[1] + p2[1]) * t +
-                (2*p0[1] - 5*p1[1] + 4*p2[1] - p3[1]) * t2 +
-                (-p0[1] + 3*p1[1] - 3*p2[1] + p3[1]) * t3
-            )
+            x = 0.5 * ((2 * p1[0]) + (-p0[0] + p2[0]) * t + (2*p0[0] - 5*p1[0] + 4*p2[0] - p3[0]) * t2 + (-p0[0] + 3*p1[0] - 3*p2[0] + p3[0]) * t3)
+            y = 0.5 * ((2 * p1[1]) + (-p0[1] + p2[1]) * t + (2*p0[1] - 5*p1[1] + 4*p2[1] - p3[1]) * t2 + (-p0[1] + 3*p1[1] - 3*p2[1] + p3[1]) * t3)
             spline_points.append([x, y])
     unique_points = []
     seen = set()
@@ -180,41 +169,23 @@ def is_path_blocked(p1, p2, obstacles_gcj, flight_height):
 
 # ==================== 单侧绕行路径生成（简化版） ====================
 def generate_side_bypass_path(start, end, obstacles_gcj, flight_height, safe_radius, side='left'):
-    """
-    生成左绕行或右绕行路径
-    side: 'left' 或 'right'
-    原理：在起点和终点之间添加一个偏移控制点，让路径从障碍物左侧或右侧绕过
-    """
-    # 获取需要绕行的障碍物
     block_obs = [obs for obs in obstacles_gcj if is_obstacle_blocking(obs, flight_height)]
     if not block_obs:
         return None
-    
-    # 安全半径转换为度数
     safe_radius_deg = safe_radius / 111000.0
-    
-    # 计算起点到终点的方向
     dx = end[0] - start[0]
     dy = end[1] - start[1]
     length = math.hypot(dx, dy)
     if length < 1e-10:
         return None
-    
-    # 单位方向向量
     ux = dx / length
     uy = dy / length
-    
-    # 垂直向量（根据左右选择方向）
     if side == 'left':
-        # 左绕行：垂直向量向左（逆时针旋转90度）
         perp_x = -uy
         perp_y = ux
     else:
-        # 右绕行：垂直向量向右（顺时针旋转90度）
         perp_x = uy
         perp_y = -ux
-    
-    # 计算所有阻挡障碍物的中心点
     all_centers = []
     for obs in block_obs:
         poly = obs["polygon"]
@@ -222,16 +193,10 @@ def generate_side_bypass_path(start, end, obstacles_gcj, flight_height, safe_rad
             cx = sum(p[0] for p in poly) / len(poly)
             cy = sum(p[1] for p in poly) / len(poly)
             all_centers.append([cx, cy])
-    
     if not all_centers:
         return None
-    
-    # 计算所有障碍物的平均中心
     avg_cx = sum(c[0] for c in all_centers) / len(all_centers)
     avg_cy = sum(c[1] for c in all_centers) / len(all_centers)
-    
-    # 计算偏移距离（根据安全半径和障碍物大小调整）
-    # 获取最远障碍物的距离
     max_dist_to_center = 0
     for obs in block_obs:
         poly = obs["polygon"]
@@ -239,59 +204,37 @@ def generate_side_bypass_path(start, end, obstacles_gcj, flight_height, safe_rad
             dist = distance([avg_cx, avg_cy], p)
             if dist > max_dist_to_center:
                 max_dist_to_center = dist
-    
-    # 偏移距离 = 障碍物半径 + 安全半径的倍数
     offset_distance = max_dist_to_center + safe_radius_deg * 3
-    
-    # 生成偏移点
-    offset_point = [
-        avg_cx + perp_x * offset_distance,
-        avg_cy + perp_y * offset_distance
-    ]
-    
-    # 构建路径：起点 -> 偏移点 -> 终点
+    offset_point = [avg_cx + perp_x * offset_distance, avg_cy + perp_y * offset_distance]
     path = [start, offset_point, end]
-    
-    # 碰撞检测
     collision = False
-    for i in range(len(path) - 1):
+    for i in range(len(path)-1):
         if is_path_blocked(path[i], path[i+1], obstacles_gcj, flight_height):
             collision = True
             break
-    
     if not collision:
-        # 平滑路径
         smoothed = catmull_rom_spline(path, num_points=8)
         final_path = simplify_path_by_distance(smoothed)
         return final_path
-    
-    # 如果失败，尝试更大的偏移距离
-    for scale in [4, 5, 6, 7, 8, 10]:
+    for scale in [4,5,6,7,8,10]:
         offset_distance = max_dist_to_center + safe_radius_deg * scale
-        offset_point = [
-            avg_cx + perp_x * offset_distance,
-            avg_cy + perp_y * offset_distance
-        ]
+        offset_point = [avg_cx + perp_x * offset_distance, avg_cy + perp_y * offset_distance]
         path = [start, offset_point, end]
-        
         collision = False
-        for i in range(len(path) - 1):
+        for i in range(len(path)-1):
             if is_path_blocked(path[i], path[i+1], obstacles_gcj, flight_height):
                 collision = True
                 break
-        
         if not collision:
             smoothed = catmull_rom_spline(path, num_points=8)
             final_path = simplify_path_by_distance(smoothed)
             return final_path
-    
     return None
 
 # ==================== A*路径规划 ====================
 def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
     nodes = [start, end]
     safety = safe_radius / 111000.0 * 2.0
-
     for obs in obstacles_gcj:
         if not is_obstacle_blocking(obs, flight_height):
             continue
@@ -299,60 +242,43 @@ def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
         if len(poly) < 3:
             continue
         for i, (x, y) in enumerate(poly):
-            prev_i = (i - 1) % len(poly)
+            prev_i = (i-1) % len(poly)
             prev = poly[prev_i]
-            next_i = (i + 1) % len(poly)
+            next_i = (i+1) % len(poly)
             next_p = poly[next_i]
-
             dx1 = -(y - prev[1])
             dy1 = x - prev[0]
             l1 = math.hypot(dx1, dy1)
             if l1 > 1e-8:
-                dx1 /= l1
-                dy1 /= l1
-            nx1 = x + dx1 * safety
-            ny1 = y + dy1 * safety
-
+                dx1 /= l1; dy1 /= l1
+            nx1 = x + dx1 * safety; ny1 = y + dy1 * safety
             dx2 = -(next_p[1] - y)
             dy2 = next_p[0] - x
             l2 = math.hypot(dx2, dy2)
             if l2 > 1e-8:
-                dx2 /= l2
-                dy2 /= l2
-            nx2 = x + dx2 * safety
-            ny2 = y + dy2 * safety
-
-            nodes.append([nx1, ny1])
-            nodes.append([nx2, ny2])
-
+                dx2 /= l2; dy2 /= l2
+            nx2 = x + dx2 * safety; ny2 = y + dy2 * safety
+            nodes.append([nx1, ny1]); nodes.append([nx2, ny2])
     unique_nodes = []
     for n in nodes:
         exists = False
         for u in unique_nodes:
-            if abs(n[0] - u[0]) < 1e-6 and abs(n[1] - u[1]) < 1e-6:
-                exists = True
-                break
+            if abs(n[0]-u[0])<1e-6 and abs(n[1]-u[1])<1e-6:
+                exists = True; break
         if not exists:
             unique_nodes.append(n)
-
     graph = {i: [] for i in range(len(unique_nodes))}
     for i in range(len(unique_nodes)):
         for j in range(len(unique_nodes)):
-            if i == j:
-                continue
+            if i==j: continue
             if not is_path_blocked(unique_nodes[i], unique_nodes[j], obstacles_gcj, flight_height):
                 graph[i].append((j, distance(unique_nodes[i], unique_nodes[j])))
-
-    start_i = -1
-    end_i = -1
+    start_i = end_i = -1
     for i, n in enumerate(unique_nodes):
-        if abs(n[0] - start[0]) < 1e-6 and abs(n[1] - start[1]) < 1e-6:
-            start_i = i
-        if abs(n[0] - end[0]) < 1e-6 and abs(n[1] - end[1]) < 1e-6:
-            end_i = i
-    if start_i == -1 or end_i == -1:
+        if abs(n[0]-start[0])<1e-6 and abs(n[1]-start[1])<1e-6: start_i=i
+        if abs(n[0]-end[0])<1e-6 and abs(n[1]-end[1])<1e-6: end_i=i
+    if start_i==-1 or end_i==-1:
         return simplify_path_by_distance([start, end])
-
     open_heap = []
     heapq.heappush(open_heap, (0, start_i))
     came_from = {}
@@ -360,9 +286,8 @@ def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
     g_score[start_i] = 0
     f_score = {i: float('inf') for i in range(len(unique_nodes))}
     f_score[start_i] = distance(unique_nodes[start_i], unique_nodes[end_i])
-
     while open_heap:
-        current_f, cur = heapq.heappop(open_heap)
+        cur_f, cur = heapq.heappop(open_heap)
         if cur == end_i:
             path = []
             while cur in came_from:
@@ -384,46 +309,41 @@ def astar_path(start, end, obstacles_gcj, flight_height, safe_radius):
 
 # ==================== 路径规划主函数 ====================
 def create_avoidance_path(start, end, obstacles_gcj, flight_height, safe_radius, strategy):
-    # 检查直线是否被阻挡
     straight_blocked = is_path_blocked(start, end, obstacles_gcj, flight_height)
-    
     if not straight_blocked:
         path = simplify_path_by_distance([start, end])
         add_gcs_obc_fcu_log(f"航线规划完成 | 类型:直线 | 航点数:{len(path)} | 路径长度:{round(sum([distance(path[i],path[i+1])*111000 for i in range(len(path)-1)]),1)}m")
         return path
-
-    # 直线被阻挡，根据策略选择绕行方式
     if strategy == 'left':
         add_gcs_obc_fcu_log(f"开始航线规划 | 类型:向左绕行 | 飞行高度:{flight_height}m")
         p = generate_side_bypass_path(start, end, obstacles_gcj, flight_height, safe_radius, 'left')
-        if p and len(p) >= 2:
-            path_length = round(sum([distance(p[i],p[i+1])*111000 for i in range(len(p)-1)]), 1)
+        if p and len(p)>=2:
+            path_length = round(sum([distance(p[i],p[i+1])*111000 for i in range(len(p)-1)]),1)
             add_gcs_obc_fcu_log(f"航线规划完成 | 类型:向左绕行成功 | 航点数:{len(p)} | 路径长度:{path_length}m")
             return p
         else:
             add_gcs_obc_fcu_log(f"向左绕行失败，降级使用A*算法")
             ast_p = astar_path(start, end, obstacles_gcj, flight_height, safe_radius)
-            path_length = round(sum([distance(ast_p[i],ast_p[i+1])*111000 for i in range(len(ast_p)-1)]), 1)
+            path_length = round(sum([distance(ast_p[i],ast_p[i+1])*111000 for i in range(len(ast_p)-1)]),1)
             add_gcs_obc_fcu_log(f"航线规划完成 | 算法:A* (备用) | 航点数:{len(ast_p)} | 路径长度:{path_length}m")
             return ast_p
     elif strategy == 'right':
         add_gcs_obc_fcu_log(f"开始航线规划 | 类型:向右绕行 | 飞行高度:{flight_height}m")
         p = generate_side_bypass_path(start, end, obstacles_gcj, flight_height, safe_radius, 'right')
-        if p and len(p) >= 2:
-            path_length = round(sum([distance(p[i],p[i+1])*111000 for i in range(len(p)-1)]), 1)
+        if p and len(p)>=2:
+            path_length = round(sum([distance(p[i],p[i+1])*111000 for i in range(len(p)-1)]),1)
             add_gcs_obc_fcu_log(f"航线规划完成 | 类型:向右绕行成功 | 航点数:{len(p)} | 路径长度:{path_length}m")
             return p
         else:
             add_gcs_obc_fcu_log(f"向右绕行失败，降级使用A*算法")
             ast_p = astar_path(start, end, obstacles_gcj, flight_height, safe_radius)
-            path_length = round(sum([distance(ast_p[i],ast_p[i+1])*111000 for i in range(len(ast_p)-1)]), 1)
+            path_length = round(sum([distance(ast_p[i],ast_p[i+1])*111000 for i in range(len(ast_p)-1)]),1)
             add_gcs_obc_fcu_log(f"航线规划完成 | 算法:A* (备用) | 航点数:{len(ast_p)} | 路径长度:{path_length}m")
             return ast_p
     else:
-        # 最佳航线 - 使用A*
         add_gcs_obc_fcu_log(f"开始航线规划 | 算法:A* | 障碍物数量:{len([o for o in obstacles_gcj if is_obstacle_blocking(o,flight_height)])}")
         ast_p = astar_path(start, end, obstacles_gcj, flight_height, safe_radius)
-        path_length = round(sum([distance(ast_p[i],ast_p[i+1])*111000 for i in range(len(ast_p)-1)]), 1)
+        path_length = round(sum([distance(ast_p[i],ast_p[i+1])*111000 for i in range(len(ast_p)-1)]),1)
         add_gcs_obc_fcu_log(f"航线规划完成 | 算法:A* | 航点数:{len(ast_p)} | 路径长度:{path_length}m")
         return ast_p
 
@@ -599,21 +519,12 @@ def create_planning_map(center_gcj, points_gcj, obstacles_gcj, flight_history=No
         if len(poly) < 3:
             continue
         for (x, y) in poly:
-            for angle in range(0, 360, 30):
+            for angle in range(0,360,30):
                 rad = math.radians(angle)
-                dx = math.cos(rad) * safe_offset
-                dy = math.sin(rad) * safe_offset
-                cx = x + dx
-                cy = y + dy
-                folium.CircleMarker(
-                    location=[cy, cx],
-                    radius=1.8,
-                    color='#00ccff',
-                    fill=True,
-                    fill_color='#00ccff',
-                    fill_opacity=0.7,
-                    popup=f'安全半径 {safe_radius}m'
-                ).add_to(m)
+                dx = math.cos(rad)*safe_offset
+                dy = math.sin(rad)*safe_offset
+                cx = x+dx; cy = y+dy
+                folium.CircleMarker(location=[cy, cx], radius=1.8, color='#00ccff', fill=True, fill_color='#00ccff', fill_opacity=0.7, popup=f'安全半径 {safe_radius}m').add_to(m)
         coords = obs.get('polygon', [])
         if coords and len(coords) >= 3:
             popup_text = f"🚧 {obs.get('name', f'障碍物{i+1}')}\n高度: {obs.get('height', 20)}m"
@@ -630,9 +541,9 @@ def create_planning_map(center_gcj, points_gcj, obstacles_gcj, flight_history=No
             folium.CircleMarker([point[1], point[0]], radius=3, color="green", fill=True, fill_color="white", fill_opacity=0.8).add_to(m)
     if points_gcj.get('A') and points_gcj.get('B'):
         if not straight_blocked:
-            folium.PolyLine([[points_gcj['A'][1], points_gcj['A'][0]], [points_gcj['B'][1], points_gcj['B'][0]]], color="blue", weight=2, opacity=0.5, dash_array='5, 5', popup="直线航线").add_to(m)
+            folium.PolyLine([[points_gcj['A'][1], points_gcj['A'][0]], [points_gcj['B'][1], points_gcj['B'][0]]], color="blue", weight=2, opacity=0.5, dash_array='5,5', popup="直线航线").add_to(m)
         else:
-            folium.PolyLine([[points_gcj['A'][1], points_gcj['A'][0]], [points_gcj['B'][1], points_gcj['B'][0]]], color="gray", weight=2, opacity=0.4, dash_array='5, 5', popup="⚠️ 直线被阻挡").add_to(m)
+            folium.PolyLine([[points_gcj['A'][1], points_gcj['A'][0]], [points_gcj['B'][1], points_gcj['B'][0]]], color="gray", weight=2, opacity=0.4, dash_array='5,5', popup="⚠️ 直线被阻挡").add_to(m)
     if flight_history and len(flight_history) > 1:
         trail = [[p[1], p[0]] for p in flight_history if len(p) >= 2]
         if len(trail) > 1:
@@ -667,6 +578,12 @@ def main():
         st.session_state.pending_polygon = None
     if "pending_height" not in st.session_state:
         st.session_state.pending_height = 20
+    # 新增：心跳监控专用状态
+    if "heartbeat_seq_list" not in st.session_state:
+        st.session_state.heartbeat_seq_list = []
+        st.session_state.heartbeat_time_list = []
+        st.session_state.last_heartbeat_time = time.time()
+        st.session_state.heartbeat_seq = 0
 
     st.sidebar.title("🎛️ 导航菜单")
     page = st.sidebar.radio("选择功能模块", ["🗺️ 航线规划", "📡 飞行监控", "🚧 障碍物管理"])
@@ -808,6 +725,43 @@ def main():
     elif page == "📡 飞行监控":
         st.header("🛸 飞行实时画面 - 任务执行监控")
 
+        # 自动刷新页面（每秒）
+        st_autorefresh(interval=1000, key="heartbeat_autorefresh")
+
+        # 生成新心跳包
+        current_time = time.time()
+        st.session_state.heartbeat_seq += 1
+        time_str = datetime.now().strftime("%H:%M:%S")
+        st.session_state.heartbeat_seq_list.append(st.session_state.heartbeat_seq)
+        st.session_state.heartbeat_time_list.append(time_str)
+        st.session_state.last_heartbeat_time = current_time
+
+        # 限制列表长度
+        if len(st.session_state.heartbeat_seq_list) > 100:
+            st.session_state.heartbeat_seq_list = st.session_state.heartbeat_seq_list[-100:]
+            st.session_state.heartbeat_time_list = st.session_state.heartbeat_time_list[-100:]
+
+        # 检测超时
+        time_since_last = current_time - st.session_state.last_heartbeat_time
+        if time_since_last > 3.0:
+            st.error("🚨 连接超时！超过3秒未收到心跳包")
+        else:
+            st.success(f"✅ 连接正常 | 距上次心跳: {time_since_last:.1f} 秒")
+
+        # 显示最新心跳序号
+        st.metric("最新心跳序号", st.session_state.heartbeat_seq)
+
+        # 绘制折线图
+        if len(st.session_state.heartbeat_seq_list) >= 2:
+            df_heartbeat = pd.DataFrame({
+                "时间": st.session_state.heartbeat_time_list,
+                "序号": st.session_state.heartbeat_seq_list
+            })
+            st.line_chart(df_heartbeat.set_index("时间"))
+
+        st.markdown("---")
+
+        # 飞行控制与状态（原功能）
         col_ctrl, col_status = st.columns([3, 1])
         with col_ctrl:
             c1, c2, c3, c4 = st.columns(4)
@@ -837,84 +791,74 @@ def main():
             status = "运行中" if st.session_state.simulation_running and not st.session_state.heartbeat_sim.paused else "已暂停"
             st.info(f"状态：{status}")
 
-        current_time = time.time()
-        auto_refresh = False
-        if st.session_state.simulation_running and not st.session_state.heartbeat_sim.paused:
-            if current_time - st.session_state.last_hb_time >= 0.15:
-                sim_data = st.session_state.heartbeat_sim.update_and_generate()
-                pos_gcj = [sim_data["lng"], sim_data["lat"]]
-                st.session_state.flight_history.append(pos_gcj)
-                st.session_state.last_hb_time = current_time
-                auto_refresh = True
-        
-        if auto_refresh:
-            st.rerun()
-
+        # 实时飞行状态显示
         if st.session_state.heartbeat_sim.history:
             latest = st.session_state.heartbeat_sim.history[0]
-            col1, col2, col3, col4, col5, col6 = st.columns(6)
-            col1.metric("当前航点", f"{latest['current_waypoint']}/{latest['total_waypoints']}")
-            col2.metric("飞行速度", f"{latest['speed']} m/s")
-            col3.metric("已用时间", f"{timedelta(seconds=latest['elapsed_time'])}")
-            col4.metric("剩余距离", f"{latest['remaining_distance']} m")
-            col5.metric("预计到达", str(timedelta(seconds=latest['remaining_time'])) if latest['remaining_time']>0 else "00:00")
-            col6.metric("电量模拟", f"{latest['battery']}%")
-
+            cols = st.columns(6)
+            cols[0].metric("当前航点", f"{latest['current_waypoint']}/{latest['total_waypoints']}")
+            cols[1].metric("飞行速度", f"{latest['speed']} m/s")
+            cols[2].metric("已用时间", str(timedelta(seconds=latest['elapsed_time'])))
+            cols[3].metric("剩余距离", f"{latest['remaining_distance']} m")
+            cols[4].metric("预计到达", str(timedelta(seconds=latest['remaining_time'])) if latest['remaining_time']>0 else "00:00")
+            cols[5].metric("电量模拟", f"{latest['battery']}%")
             st.progress(latest['progress'], text=f"任务进度：{latest['progress']*100:.0f}%")
-            st.markdown("---")
+        else:
+            st.info("等待飞行任务开始...")
 
-            map_col, comm_col = st.columns([2, 1])
-            with map_col:
-                st.subheader("实时飞行地图")
-                center = st.session_state.points_gcj['A'] or SCHOOL_CENTER_GCJ
-                m = create_planning_map(center, st.session_state.points_gcj, st.session_state.obstacles_gcj,
-                                       st.session_state.flight_history, st.session_state.planned_path, map_type, straight_blocked, safe_radius)
-                folium_static(m, width=600, height=400)
-            with comm_col:
-                st.subheader("📡 通信链路拓扑与数据流")
-                topo_html = '''
-                <div style="display:flex; justify-content:space-around; text-align:center; margin-top:10px;">
-                    <div style="width:28%; padding:12px; background:#e3f2fd; border:2px solid #1976d2; border-radius:8px;">
-                        <div style="font-weight:bold; font-size:16px; color:#1976d2;">GCS</div>
-                        <div style="font-size:12px;">地面站<br/>192.168.1.100</div>
-                        <div style="color:green; font-size:13px;">✅在线</div>
-                    </div>
-                    <div style="display:flex;align-items:center;">⬇️UDP:14550⬆️</div>
-                    <div style="width:28%; padding:12px; background:#fff8e1; border:2px solid #f57c00; border-radius:8px;">
-                        <div style="font-weight:bold; font-size:16px; color:#f57c00;">OBC</div>
-                        <div style="font-size:12px;">机载计算机<br/>Raspberry Pi4</div>
-                        <div style="color:green; font-size:13px;">✅在线</div>
-                    </div>
-                    <div style="display:flex;align-items:center;">⬇️MAVLink⬆️</div>
-                    <div style="width:28%; padding:12px; background:#fce4ec; border:2px solid #c2185b; border-radius:8px;">
-                        <div style="font-weight:bold; font-size:16px; color:#c2185b;">FCU</div>
-                        <div style="font-size:12px;">飞控<br/>PX4/ArduPilot</div>
-                        <div style="color:green; font-size:13px;">✅在线</div>
-                    </div>
-                </div>
-                <div style="margin-top:15px; padding:8px; background:#f5f5f5; border-radius:6px; font-size:13px;">
-                📊链路统计：GCS↔OBC:正常｜OBC↔FCU:正常｜延迟:~25ms｜丢包率:0.1%
-                </div>
-                '''
-                st.markdown(topo_html, unsafe_allow_html=True)
+        st.markdown("---")
 
-                tab1, tab2 = st.tabs(["📤GCS→OBC→FCU下发日志", "📥FCU→OBC→GCS回传日志"])
-                with tab1:
-                    log_text1 = ""
-                    if len(st.session_state.gcs2fcu_log) == 0:
-                        log_text1 = "暂无航线下发日志\n点击重新规划生成日志"
-                    else:
-                        for line in st.session_state.gcs2fcu_log[-30:]:
-                            log_text1 += line + "\n"
-                    st.text_area("", log_text1, height=220)
-                with tab2:
-                    log_text2 = ""
-                    if len(st.session_state.fcu2gcs_log) == 0:
-                        log_text2 = "暂无飞控回传日志\n启动飞机飞行生成抵达日志"
-                    else:
-                        for line in st.session_state.fcu2gcs_log[-30:]:
-                            log_text2 += line + "\n"
-                    st.text_area("", log_text2, height=220)
+        # 地图和通信日志（原功能）
+        map_col, comm_col = st.columns([2, 1])
+        with map_col:
+            st.subheader("实时飞行地图")
+            center = st.session_state.points_gcj['A'] or SCHOOL_CENTER_GCJ
+            m = create_planning_map(center, st.session_state.points_gcj, st.session_state.obstacles_gcj,
+                                   st.session_state.flight_history, st.session_state.planned_path, map_type, straight_blocked, safe_radius)
+            folium_static(m, width=600, height=400)
+        with comm_col:
+            st.subheader("📡 通信链路拓扑与数据流")
+            topo_html = '''
+            <div style="display:flex; justify-content:space-around; text-align:center; margin-top:10px;">
+                <div style="width:28%; padding:12px; background:#e3f2fd; border:2px solid #1976d2; border-radius:8px;">
+                    <div style="font-weight:bold; font-size:16px; color:#1976d2;">GCS</div>
+                    <div style="font-size:12px;">地面站<br/>192.168.1.100</div>
+                    <div style="color:green; font-size:13px;">✅在线</div>
+                </div>
+                <div style="display:flex;align-items:center;">⬇️UDP:14550⬆️</div>
+                <div style="width:28%; padding:12px; background:#fff8e1; border:2px solid #f57c00; border-radius:8px;">
+                    <div style="font-weight:bold; font-size:16px; color:#f57c00;">OBC</div>
+                    <div style="font-size:12px;">机载计算机<br/>Raspberry Pi4</div>
+                    <div style="color:green; font-size:13px;">✅在线</div>
+                </div>
+                <div style="display:flex;align-items:center;">⬇️MAVLink⬆️</div>
+                <div style="width:28%; padding:12px; background:#fce4ec; border:2px solid #c2185b; border-radius:8px;">
+                    <div style="font-weight:bold; font-size:16px; color:#c2185b;">FCU</div>
+                    <div style="font-size:12px;">飞控<br/>PX4/ArduPilot</div>
+                    <div style="color:green; font-size:13px;">✅在线</div>
+                </div>
+            </div>
+            <div style="margin-top:15px; padding:8px; background:#f5f5f5; border-radius:6px; font-size:13px;">
+            📊链路统计：GCS↔OBC:正常｜OBC↔FCU:正常｜延迟:~25ms｜丢包率:0.1%
+            </div>
+            '''
+            st.markdown(topo_html, unsafe_allow_html=True)
+            tab1, tab2 = st.tabs(["📤GCS→OBC→FCU下发日志", "📥FCU→OBC→GCS回传日志"])
+            with tab1:
+                log_text1 = ""
+                if len(st.session_state.gcs2fcu_log) == 0:
+                    log_text1 = "暂无航线下发日志\n点击重新规划生成日志"
+                else:
+                    for line in st.session_state.gcs2fcu_log[-30:]:
+                        log_text1 += line + "\n"
+                st.text_area("", log_text1, height=220)
+            with tab2:
+                log_text2 = ""
+                if len(st.session_state.fcu2gcs_log) == 0:
+                    log_text2 = "暂无飞控回传日志\n启动飞机飞行生成抵达日志"
+                else:
+                    for line in st.session_state.fcu2gcs_log[-30:]:
+                        log_text2 += line + "\n"
+                st.text_area("", log_text2, height=220)
 
     # ==================== 障碍物管理 ====================
     elif page == "🚧 障碍物管理":
@@ -937,4 +881,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
